@@ -61,8 +61,15 @@ public:
             frame->data[2], frame->linesize[2]);
         SDL_RenderClear(renderer_);
         SDL_RenderCopy(renderer_, texture_, nullptr, nullptr);
-        SDL_RenderPresent(renderer_);
+        // Present is deferred — caller may draw HUD overlay before presenting
     }
+
+    // Call after render() + any overlay drawing to flip the buffer.
+    void present() {
+        if (renderer_) SDL_RenderPresent(renderer_);
+    }
+
+    SDL_Renderer* renderer() const { return renderer_; }
 
     void destroy() {
         if (texture_) { SDL_DestroyTexture(texture_); texture_ = nullptr; }

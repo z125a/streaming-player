@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming Player (WebAssembly)</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e; color: #eee;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex; flex-direction: column; align-items: center;
+            min-height: 100vh; padding: 20px;
+        }
+        h1 { margin-bottom: 16px; color: #e94560; }
+        .player-container {
+            background: #000; border-radius: 8px; overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5); max-width: 720px; width: 100%;
+        }
+        canvas {
+            width: 100%; aspect-ratio: 16/9; display: block; background: #111;
+        }
+        .controls {
+            display: flex; align-items: center; gap: 12px;
+            padding: 12px 16px; background: #16213e;
+        }
+        button {
+            background: #e94560; color: white; border: none;
+            padding: 8px 20px; border-radius: 4px; cursor: pointer;
+            font-size: 14px; font-weight: 600;
+        }
+        button:hover { background: #c23152; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        input[type="text"] {
+            flex: 1; padding: 8px 12px; border-radius: 4px;
+            border: 1px solid #333; background: #0f3460; color: #eee;
+            font-size: 14px;
+        }
+        .stats {
+            margin-top: 16px; padding: 16px; background: #16213e;
+            border-radius: 8px; font-family: monospace; font-size: 13px;
+            line-height: 1.6; max-width: 720px; width: 100%;
+        }
+        .stats .label { color: #888; }
+        .stats .value { color: #53d769; }
+        .stats .warn { color: #ffcc00; }
+        #status { color: #888; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <h1>Streaming Player</h1>
+
+    <div class="player-container">
+        <canvas id="videoCanvas" width="640" height="360"></canvas>
+        <div class="controls">
+            <button id="btnPlay" disabled>Play</button>
+            <input type="text" id="urlInput" value="http://localhost:8080/live/stream.m3u8"
+                   placeholder="Enter stream URL...">
+            <span id="status">Loading WASM...</span>
+        </div>
+    </div>
+
+    <div class="stats" id="statsPanel">
+        <div><span class="label">State: </span><span class="value" id="statState">-</span></div>
+        <div><span class="label">Resolution: </span><span class="value" id="statRes">-</span></div>
+        <div><span class="label">FPS: </span><span class="value" id="statFps">-</span></div>
+        <div><span class="label">Frames: </span><span class="value" id="statFrames">-</span>
+             <span class="label"> Dropped: </span><span class="warn" id="statDropped">-</span></div>
+        <div><span class="label">Duration: </span><span class="value" id="statDuration">-</span></div>
+    </div>
+
+    <script>
+        // WebGL YUV420P renderer
+        class YUVRenderer {
+            constructor(canvas) {
+                this.gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                if (!this.gl) { console.error('WebGL not supported'); return; }
+                this.initShaders();
+            }
+
+            initShaders() {
+                const gl = this.gl;
+                const vs = `
+                    attribute vec4 a_position;
+                    attribute vec2 a_texCoord;
+                    varying vec2 v_texCoord;
+                    void main() {
+                        gl_Position = a_position;
+                        v_texCoord = a_texCoord;
+                    }`;
+                const fs = `
+                    precision mediump float;
+                    varying vec2 v_texCoord;
+                    uniform sampler2D u_textureY;
+                    uniform sampler2D u_textureU;
+                    uniform sampler2D u_textureV;
+                    void main() {
+                        float y = texture2D(u_textureY, v_texCoord).r;
+                        float u = texture2D(u_textureU, v_texCoord).r - 0.5;
+                        float v = texture2D(u_textureV, v_texCoord).r - 0.5;
+                        gl_FragColor = vec4(
+                            y + 1.402 * v,
+                            y - 0.344136 * u - 0.714136 * v,
+                            y + 1.772 * u,
+                            1.0
+                        );
+                    }`;
+
+                this.program = this.createProgram(vs, fs);
+                gl.useProgram(this.program);
+
+                // Quad vertices
+                const vertices = new Float32Array([
+                    -1, -1, 0, 1,   1, -1, 1, 1,
+                    -1,  1, 0, 0,   1,  1, 1, 0,
+                ]);
+                const buf = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+                gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+                const aPos = gl.getAttribLocation(this.program, 'a_position');
+                gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+                gl.enableVertexAttribArray(aPos);
+
+                const aTex = gl.getAttribLocation(this.program, 'a_texCoord');
+                gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 16, 8);
+                gl.enableVertexAttribArray(aTex);
+
+                // Create YUV textures
+                this.texY = this.createTexture(gl.TEXTURE0, 'u_textureY', 0);
+                this.texU = this.createTexture(gl.TEXTURE1, 'u_textureU', 1);
+                this.texV = this.createTexture(gl.TEXTURE2, 'u_textureV', 2);
+            }
+
+            createTexture(unit, name, idx) {
+                const gl = this.gl;
+                const tex = gl.createTexture();
+                gl.activeTexture(unit);
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                gl.uniform1i(gl.getUniformLocation(this.program, name), idx);
+                return tex;
+            }
+
+            // Render a YUV420P frame (Uint8Arrays for Y, U, V planes)
+            renderFrame(yData, uData, vData, width, height) {
+                const gl = this.gl;
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, this.texY);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width, height, 0,
+                              gl.LUMINANCE, gl.UNSIGNED_BYTE, yData);
+                gl.activeTexture(gl.TEXTURE1);
+                gl.bindTexture(gl.TEXTURE_2D, this.texU);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width/2, height/2, 0,
+                              gl.LUMINANCE, gl.UNSIGNED_BYTE, uData);
+                gl.activeTexture(gl.TEXTURE2);
+                gl.bindTexture(gl.TEXTURE_2D, this.texV);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width/2, height/2, 0,
+                              gl.LUMINANCE, gl.UNSIGNED_BYTE, vData);
+                gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            }
+
+            createProgram(vsSrc, fsSrc) {
+                const gl = this.gl;
+                const vs = gl.createShader(gl.VERTEX_SHADER);
+                gl.shaderSource(vs, vsSrc);
+                gl.compileShader(vs);
+                const fs = gl.createShader(gl.FRAGMENT_SHADER);
+                gl.shaderSource(fs, fsSrc);
+                gl.compileShader(fs);
+                const prog = gl.createProgram();
+                gl.attachShader(prog, vs);
+                gl.attachShader(prog, fs);
+                gl.linkProgram(prog);
+                return prog;
+            }
+        }
+
+        // Initialize
+        const canvas = document.getElementById('videoCanvas');
+        const renderer = new YUVRenderer(canvas);
+        const btnPlay = document.getElementById('btnPlay');
+        const urlInput = document.getElementById('urlInput');
+        const status = document.getElementById('status');
+
+        let playerHandle = null;
+        let Module = null;
+
+        // Load WASM module
+        async function init() {
+            try {
+                // In production: load the compiled sp_player.js
+                // For now, show ready state
+                status.textContent = 'Ready (WASM skeleton)';
+                btnPlay.disabled = false;
+            } catch (e) {
+                status.textContent = 'WASM load failed: ' + e.message;
+            }
+        }
+
+        let playing = false;
+        btnPlay.addEventListener('click', () => {
+            if (!playing) {
+                const url = urlInput.value;
+                status.textContent = 'Playing: ' + url;
+                btnPlay.textContent = 'Stop';
+                playing = true;
+                updateStats({ state: 1, url: url });
+
+                // In production: call Module.ccall('player_open', ...) etc.
+                // Demo: show a test pattern on canvas
+                drawTestPattern();
+            } else {
+                status.textContent = 'Stopped';
+                btnPlay.textContent = 'Play';
+                playing = false;
+                updateStats({ state: 3 });
+            }
+        });
+
+        function drawTestPattern() {
+            const w = 640, h = 360;
+            const ySize = w * h, uvSize = (w/2) * (h/2);
+            const yData = new Uint8Array(ySize);
+            const uData = new Uint8Array(uvSize);
+            const vData = new Uint8Array(uvSize);
+
+            // Generate color bars
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const bar = Math.floor(x / (w/8));
+                    const luma = [235, 162, 131, 112, 84, 65, 35, 16][bar] || 128;
+                    yData[y * w + x] = luma;
+                }
+            }
+            for (let y = 0; y < h/2; y++) {
+                for (let x = 0; x < w/2; x++) {
+                    const bar = Math.floor(x / (w/16));
+                    uData[y * (w/2) + x] = [128, 44, 156, 72, 184, 100, 212, 128][bar] || 128;
+                    vData[y * (w/2) + x] = [128, 142, 44, 58, 198, 212, 114, 128][bar] || 128;
+                }
+            }
+
+            renderer.renderFrame(yData, uData, vData, w, h);
+        }
+
+        function updateStats(data) {
+            const states = ['Idle', 'Playing', 'Paused', 'Stopped'];
+            document.getElementById('statState').textContent = states[data.state] || '-';
+            document.getElementById('statRes').textContent = (data.width || 640) + 'x' + (data.height || 360);
+            document.getElementById('statFps').textContent = (data.fps || 0).toFixed(1);
+            document.getElementById('statFrames').textContent = data.framesDecoded || 0;
+            document.getElementById('statDropped').textContent = data.framesDropped || 0;
+            document.getElementById('statDuration').textContent = (data.duration || 0).toFixed(1) + 's';
+        }
+
+        init();
+    </script>
+</body>
+</html>

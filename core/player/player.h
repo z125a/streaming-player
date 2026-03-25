@@ -12,6 +12,8 @@
 #include "decoder/decoder_factory.h"
 #include "render/video_render.h"
 #include "render/audio_render.h"
+#include "render/debug_hud.h"
+#include "common/stats.h"
 
 namespace sp {
 
@@ -103,6 +105,18 @@ public:
                                       [this](AVFrame* f) { return audio_frame_queue_.pop(f); }))
                 return false;
         }
+
+        // Init stats
+        stats_.reset();
+        stats_.mark_open();
+        stats_.set_decoder_info(
+            video_decoder_ ? video_decoder_->name() : "none",
+            audio_decoder_ ? audio_decoder_->name() : "none",
+            video_decoder_ && video_decoder_->codec_ctx()
+                ? avcodec_get_name(video_decoder_->codec_ctx()->codec_id) : "none",
+            video_width_, video_height_,
+            video_decoder_ && std::string(video_decoder_->name()).find("HW") != std::string::npos
+        );
 
         // Start pipeline
         demuxer_->set_eof_callback([this] { eof_ = true; });
@@ -209,6 +223,10 @@ private:
         case SDLK_LEFT:
             seek(std::max(0.0, get_clock() - 10.0));
             break;
+        case SDLK_d:
+            debug_hud_.toggle();
+            SP_LOGI("Player", "Debug HUD: %s", debug_hud_.visible() ? "ON" : "OFF");
+            break;
         case SDLK_ESCAPE:
         case SDLK_q:
             state_ = PlayerState::Stopped;
@@ -277,9 +295,33 @@ private:
                     frame->format,
                     av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)),
                     frame->width, frame->height);
+            stats_.mark_first_frame();
         }
 
+        // Update stats
+        stats_.on_video_frame_rendered();
+        stats_.set_queue_levels(
+            static_cast<int>(video_pkt_queue_.size()),
+            static_cast<int>(audio_pkt_queue_.size()),
+            static_cast<int>(video_frame_queue_.size()),
+            static_cast<int>(audio_frame_queue_.size()));
+        if (audio_render_) {
+            double actual_pts = (frame->pts != AV_NOPTS_VALUE)
+                ? static_cast<double>(frame->pts) * av_q2d(video_time_base_) : 0.0;
+            double audio_pts = audio_render_->audio_clock();
+            stats_.set_av_sync_diff((actual_pts - audio_pts) * 1000.0);
+        }
+
+        // Render video frame (does not present yet)
         video_render_->render(frame);
+
+        // Render debug HUD overlay on top of video
+        if (debug_hud_.visible()) {
+            debug_hud_.render(video_render_->renderer(), stats_.snapshot());
+        }
+
+        // Present everything
+        video_render_->present();
         av_frame_unref(frame);
     }
 
@@ -306,6 +348,10 @@ private:
     std::unique_ptr<IDecoder> audio_decoder_;
     std::unique_ptr<VideoRender> video_render_;
     std::unique_ptr<AudioRender> audio_render_;
+
+    // Stats & Debug
+    StatsCollector stats_;
+    DebugHUD debug_hud_;
 
     // SDL
     SDL_Window* window_ = nullptr;
