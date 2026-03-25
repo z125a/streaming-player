@@ -1,27 +1,17 @@
 #pragma once
-#include <thread>
-#include <atomic>
-
-extern "C" {
-#include <libavcodec/avcodec.h>
-}
-
-#include "common/packet_queue.h"
-#include "common/frame_queue.h"
-#include "common/log.h"
+#include "decoder/i_decoder.h"
 
 namespace sp {
 
-// Software decoder using libavcodec.
-// Reads from PacketQueue, decodes, and pushes to FrameQueue.
-class Decoder {
+// Software decoder using libavcodec (CPU-based).
+class SoftDecoder : public IDecoder {
 public:
-    Decoder(PacketQueue& pkt_queue, FrameQueue& frame_queue, const char* tag = "Decoder")
-        : pkt_queue_(pkt_queue), frame_queue_(frame_queue), tag_(tag) {}
+    SoftDecoder(PacketQueue& pkt_queue, FrameQueue& frame_queue, const char* tag = "SoftDec")
+        : IDecoder(pkt_queue, frame_queue, tag) {}
 
-    ~Decoder() { close(); }
+    ~SoftDecoder() override { close(); }
 
-    bool open(const AVCodecParameters* codecpar) {
+    bool open(const AVCodecParameters* codecpar) override {
         const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
         if (!codec) {
             SP_LOGE(tag_, "Codec not found: %d", codecpar->codec_id);
@@ -31,43 +21,37 @@ public:
         codec_ctx_ = avcodec_alloc_context3(codec);
         avcodec_parameters_to_context(codec_ctx_, codecpar);
 
+        // Enable multi-threaded decoding
+        codec_ctx_->thread_count = 0; // auto-detect
+        codec_ctx_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
         if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
             SP_LOGE(tag_, "Failed to open codec");
             return false;
         }
 
-        SP_LOGI(tag_, "Opened codec: %s", codec->name);
+        SP_LOGI(tag_, "Opened software codec: %s (threads=%d)",
+                codec->name, codec_ctx_->thread_count);
         return true;
     }
 
-    void start() {
-        running_ = true;
-        thread_ = std::thread(&Decoder::decode_loop, this);
-    }
-
-    void stop() {
-        running_ = false;
-        pkt_queue_.abort();
-        frame_queue_.abort();
-        if (thread_.joinable()) thread_.join();
-    }
-
-    void flush() {
+    void flush() override {
         if (codec_ctx_) avcodec_flush_buffers(codec_ctx_);
     }
 
-    AVCodecContext* codec_ctx() const { return codec_ctx_; }
+    AVCodecContext* codec_ctx() const override { return codec_ctx_; }
+    const char* name() const override { return "SoftDecoder"; }
 
-    void close() {
-        stop();
+    void close() override {
+        IDecoder::close();
         if (codec_ctx_) {
             avcodec_free_context(&codec_ctx_);
             codec_ctx_ = nullptr;
         }
     }
 
-private:
-    void decode_loop() {
+protected:
+    void decode_loop() override {
         AVPacket* pkt = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
 
@@ -100,11 +84,6 @@ private:
     }
 
     AVCodecContext* codec_ctx_ = nullptr;
-    PacketQueue& pkt_queue_;
-    FrameQueue& frame_queue_;
-    std::thread thread_;
-    std::atomic<bool> running_{false};
-    const char* tag_;
 };
 
 } // namespace sp

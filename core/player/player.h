@@ -9,7 +9,7 @@
 #include "common/packet_queue.h"
 #include "common/frame_queue.h"
 #include "demuxer/demuxer.h"
-#include "decoder/decoder.h"
+#include "decoder/decoder_factory.h"
 #include "render/video_render.h"
 #include "render/audio_render.h"
 
@@ -37,19 +37,26 @@ public:
 
         const auto& info = demuxer_->media_info();
 
-        // Open video decoder
+        // Log available decoders
+        DecoderFactory::log_available();
+
+        // Open video decoder (hw preferred, auto fallback to sw)
         if (info.video_codecpar) {
-            video_decoder_ = std::make_unique<Decoder>(video_pkt_queue_, video_frame_queue_, "VDec");
-            if (!video_decoder_->open(info.video_codecpar)) return false;
+            video_decoder_ = DecoderFactory::create(
+                video_pkt_queue_, video_frame_queue_, info.video_codecpar,
+                DecoderType::Auto, "VDec");
+            if (!video_decoder_) return false;
             video_width_ = info.video_codecpar->width;
             video_height_ = info.video_codecpar->height;
             video_time_base_ = info.video_time_base;
         }
 
-        // Open audio decoder
+        // Open audio decoder (always software — hw audio decode has no benefit)
         if (info.audio_codecpar) {
-            audio_decoder_ = std::make_unique<Decoder>(audio_pkt_queue_, audio_frame_queue_, "ADec");
-            if (!audio_decoder_->open(info.audio_codecpar)) return false;
+            audio_decoder_ = DecoderFactory::create(
+                audio_pkt_queue_, audio_frame_queue_, info.audio_codecpar,
+                DecoderType::Software, "ADec");
+            if (!audio_decoder_) return false;
             audio_time_base_ = info.audio_time_base;
         }
 
@@ -268,8 +275,8 @@ private:
 
     // Components
     std::unique_ptr<Demuxer> demuxer_;
-    std::unique_ptr<Decoder> video_decoder_;
-    std::unique_ptr<Decoder> audio_decoder_;
+    std::unique_ptr<IDecoder> video_decoder_;
+    std::unique_ptr<IDecoder> audio_decoder_;
     std::unique_ptr<VideoRender> video_render_;
     std::unique_ptr<AudioRender> audio_render_;
 
