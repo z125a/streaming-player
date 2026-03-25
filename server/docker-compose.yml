@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  srs:
+    image: registry.cn-hangzhou.aliyuncs.com/ossrs/srs:5
+    container_name: srs
+    restart: unless-stopped
+    ports:
+      - "1935:1935"    # RTMP push/pull
+      - "1985:1985"    # SRS HTTP API
+      - "8080:8080"    # HTTP-FLV / HLS pull
+      - "8000:8000/udp" # WebRTC (UDP)
+    volumes:
+      - ./srs/srs.conf:/usr/local/srs/conf/srs.conf
+      - ./srs/dvr:/usr/local/srs/objs/nginx/html/dvr
+    environment:
+      - CANDIDATE=${CANDIDATE:-127.0.0.1}  # WebRTC candidate IP
