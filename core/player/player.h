@@ -87,7 +87,7 @@ public:
             return false;
         }
 
-        // Init video render
+        // Init video render (on main thread — SDL requires this)
         if (video_decoder_) {
             video_render_ = std::make_unique<VideoRender>();
             if (!video_render_->init(window_, video_width_, video_height_)) return false;
@@ -95,7 +95,6 @@ public:
 
         // Init audio render
         if (audio_decoder_) {
-            const auto& info = demuxer_->media_info();
             AVCodecContext* actx = audio_decoder_->codec_ctx();
             audio_render_ = std::make_unique<AudioRender>();
             audio_render_->audio_time_base_ = audio_time_base_;
@@ -117,12 +116,6 @@ public:
         if (audio_render_) audio_render_->start();
 
         state_ = PlayerState::Playing;
-
-        // Video render loop in a separate thread
-        if (video_render_) {
-            video_thread_ = std::thread(&Player::video_render_loop, this);
-        }
-
         return true;
     }
 
@@ -139,8 +132,7 @@ public:
     }
 
     void seek(double pos_sec) {
-        if (!demuxer_ || is_live_) return; // No seek for live streams
-        // Flush queues
+        if (!demuxer_ || is_live_) return;
         video_pkt_queue_.flush();
         audio_pkt_queue_.flush();
         video_frame_queue_.flush();
@@ -151,10 +143,14 @@ public:
         eof_ = false;
     }
 
-    // Run the SDL event loop (blocking, call from main thread).
+    // Run the main loop: SDL events + video rendering on the MAIN THREAD.
+    // SDL2 requires all rendering to happen on the thread that created the renderer.
     void event_loop() {
         SDL_Event event;
+        AVFrame* frame = av_frame_alloc();
+
         while (state_ != PlayerState::Stopped) {
+            // 1. Process SDL events
             while (SDL_PollEvent(&event)) {
                 switch (event.type) {
                 case SDL_QUIT:
@@ -165,8 +161,16 @@ public:
                     break;
                 }
             }
-            SDL_Delay(10);
+
+            // 2. Render video frames (on main thread!)
+            if (state_ == PlayerState::Playing && video_render_) {
+                render_video_frame(frame);
+            } else {
+                SDL_Delay(10);
+            }
         }
+
+        av_frame_free(&frame);
     }
 
     void close() {
@@ -180,8 +184,6 @@ public:
         audio_pkt_queue_.abort();
         video_frame_queue_.abort();
         audio_frame_queue_.abort();
-
-        if (video_thread_.joinable()) video_thread_.join();
 
         audio_render_.reset();
         video_render_.reset();
@@ -219,43 +221,66 @@ private:
         return 0.0;
     }
 
-    // A/V sync: video render loop driven by audio clock.
-    void video_render_loop() {
-        AVFrame* frame = av_frame_alloc();
-        while (state_ != PlayerState::Stopped) {
-            if (state_ == PlayerState::Paused) {
-                SDL_Delay(10);
-                continue;
-            }
-
-            if (!video_frame_queue_.pop(frame)) break;
-
-            // Compute frame PTS in seconds
-            double pts = 0.0;
-            if (frame->pts != AV_NOPTS_VALUE)
-                pts = static_cast<double>(frame->pts) * av_q2d(video_time_base_);
-
-            // A/V sync: wait until audio clock catches up
-            if (audio_render_) {
-                double audio_pts = audio_render_->audio_clock();
-                double diff = pts - audio_pts;
-
-                if (diff > 0.01) {
-                    // Video is ahead — wait
-                    int delay_ms = static_cast<int>(diff * 1000);
-                    if (delay_ms > 100) delay_ms = 100; // cap wait
-                    SDL_Delay(delay_ms);
-                } else if (diff < -0.1) {
-                    // Video is behind — drop frame
-                    av_frame_unref(frame);
-                    continue;
-                }
-            }
-
-            video_render_->render(frame);
-            av_frame_unref(frame);
+    // Try to pop a video frame and render it with A/V sync.
+    // Called from the main thread event loop — non-blocking.
+    void render_video_frame(AVFrame* frame) {
+        // Non-blocking peek: is there a frame ready?
+        double peek_pts = 0.0;
+        if (!video_frame_queue_.peek_pts(&peek_pts)) {
+            // No frame ready yet — don't block the event loop
+            SDL_Delay(1);
+            return;
         }
-        av_frame_free(&frame);
+
+        // Compute frame PTS in seconds
+        double pts = peek_pts * av_q2d(video_time_base_);
+
+        // A/V sync check
+        if (audio_render_) {
+            double audio_pts = audio_render_->audio_clock();
+            double diff = pts - audio_pts;
+
+            if (diff > 0.05) {
+                // Video is ahead — wait, don't pop yet
+                SDL_Delay(std::min(static_cast<int>(diff * 1000), 15));
+                return;
+            }
+        }
+
+        // Pop and render
+        if (!video_frame_queue_.pop(frame)) return;
+
+        // Re-check sync after pop (for frame dropping)
+        if (audio_render_) {
+            double actual_pts = 0.0;
+            if (frame->pts != AV_NOPTS_VALUE)
+                actual_pts = static_cast<double>(frame->pts) * av_q2d(video_time_base_);
+            double audio_pts = audio_render_->audio_clock();
+            double diff = actual_pts - audio_pts;
+
+            if (diff < -0.1) {
+                // Video is behind — drop frame, try next
+                if (frame_count_ > 0) {
+                    drop_count_++;
+                    if (drop_count_ % 30 == 1)
+                        SP_LOGW("Player", "Dropping late frame (diff=%.3fs, dropped=%d)",
+                                diff, drop_count_);
+                }
+                av_frame_unref(frame);
+                return;
+            }
+        }
+
+        // Debug: log first frame
+        if (frame_count_++ == 0) {
+            SP_LOGI("Player", "First video frame rendered: format=%d(%s) %dx%d",
+                    frame->format,
+                    av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)),
+                    frame->width, frame->height);
+        }
+
+        video_render_->render(frame);
+        av_frame_unref(frame);
     }
 
     std::string url_;
@@ -265,6 +290,8 @@ private:
     AVRational video_time_base_{1, 1};
     AVRational audio_time_base_{1, 1};
     bool is_live_ = false;
+    int frame_count_ = 0;
+    int drop_count_ = 0;
     std::atomic<bool> eof_{false};
 
     // Queues
@@ -282,7 +309,6 @@ private:
 
     // SDL
     SDL_Window* window_ = nullptr;
-    std::thread video_thread_;
 };
 
 } // namespace sp

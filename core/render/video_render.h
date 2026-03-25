@@ -40,8 +40,14 @@ public:
     void render(AVFrame* frame) {
         if (!texture_) return;
 
+        render_count_++;
         // Convert to YUV420P if needed
         if (frame->format != AV_PIX_FMT_YUV420P) {
+            if (render_count_ == 1) {
+                SP_LOGI("VideoRender", "Converting format %d(%s) → YUV420P via sws_scale",
+                        frame->format,
+                        av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
+            }
             if (!ensure_sws(frame->width, frame->height, static_cast<AVPixelFormat>(frame->format)))
                 return;
             sws_scale(sws_ctx_, frame->data, frame->linesize, 0, frame->height,
@@ -89,6 +95,7 @@ private:
     AVPixelFormat sws_src_fmt_ = AV_PIX_FMT_NONE;
     AVFrame* tmp_frame_ = nullptr;
     int width_ = 0, height_ = 0;
+    int render_count_ = 0;
 };
 
 } // namespace sp
