@@ -176,7 +176,14 @@ public:
                 }
             }
 
-            // 2. Render video frames (on main thread!)
+            // 2. Check EOF
+            if (eof_ && video_frame_queue_.size() == 0) {
+                SP_LOGI("Player", "Playback finished");
+                state_ = PlayerState::Stopped;
+                break;
+            }
+
+            // 3. Render video frames (on main thread!)
             if (state_ == PlayerState::Playing && video_render_) {
                 render_video_frame(frame);
             } else {

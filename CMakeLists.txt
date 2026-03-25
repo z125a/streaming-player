@@ -13,6 +13,7 @@ pkg_check_modules(AVUTIL   REQUIRED libavutil)
 pkg_check_modules(SWSCALE  REQUIRED libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 pkg_check_modules(SDL2     REQUIRED sdl2)
+pkg_check_modules(SDL2_TTF REQUIRED SDL2_ttf)
 
 # --- Core (header-only interface library) ---
 add_library(sp_core INTERFACE)
@@ -25,6 +26,7 @@ target_include_directories(sp_core INTERFACE
     ${SWSCALE_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${SDL2_INCLUDE_DIRS}
+    ${SDL2_TTF_INCLUDE_DIRS}
 )
 
 target_link_libraries(sp_core INTERFACE
@@ -34,6 +36,7 @@ target_link_libraries(sp_core INTERFACE
     ${SWSCALE_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${SDL2_LIBRARIES}
+    ${SDL2_TTF_LIBRARIES}
     pthread
 )
 
