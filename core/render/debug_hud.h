@@ -20,13 +20,18 @@ public:
 
         // Semi-transparent background
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-        SDL_Rect bg = {8, 8, 340, 220};
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
+        SDL_Rect bg = {8, 8, 520, 340};
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
         SDL_RenderFillRect(renderer, &bg);
 
-        int y = 14;
-        const int x = 14;
-        const int line_h = 16;
+        // Thin accent bar on top
+        SDL_Rect accent = {8, 8, 520, 3};
+        SDL_SetRenderDrawColor(renderer, 0xe9, 0x45, 0x60, 255);
+        SDL_RenderFillRect(renderer, &accent);
+
+        int y = 18;
+        const int x = 16;
+        const int line_h = 24;
 
         // Decoder info
         char buf[256];
@@ -84,7 +89,7 @@ public:
         draw_text(renderer, x, y, buf, 0xCCCCCC); y += line_h;
 
         // Footer
-        draw_text(renderer, x, y + 4, "Press D to hide", 0x666666);
+        draw_text(renderer, x, y + 8, "Press D to hide", 0x555555);
     }
 
 private:
@@ -101,17 +106,13 @@ private:
             char ch = *p;
             if (ch < 32 || ch > 126) ch = '?';
             draw_char(renderer, cx, y, ch);
-            cx += 7; // character width + spacing
+            cx += 10; // character width (5*scale) + 2px spacing
         }
     }
 
     void draw_char(SDL_Renderer* renderer, int x, int y, char ch) {
-        // Simple bitmap font: use SDL rectangles to draw characters.
-        // This is a minimal approach — each character is drawn as small rects.
-        // For a production player you'd use SDL_ttf or texture atlas.
-        const int scale = 2;
+        const int scale = 3; // 3x scale → each glyph is 15x21 pixels
 
-        // Get the 5x7 bitmap for this character from our mini font
         const uint8_t* glyph = get_glyph(ch);
         if (!glyph) return;
 
