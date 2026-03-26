@@ -87,7 +87,8 @@ private:
         PacketQueue& pkt_queue, FrameQueue& frame_queue,
         const AVCodecParameters* codecpar, const char* tag)
     {
-        auto dec = std::make_unique<SoftDecoder>(pkt_queue, frame_queue, tag);
+        bool is_video = (codecpar->codec_type == AVMEDIA_TYPE_VIDEO);
+        auto dec = std::make_unique<SoftDecoder>(pkt_queue, frame_queue, tag, is_video);
         if (dec->open(codecpar)) return dec;
         return nullptr;
     }

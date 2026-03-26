@@ -17,7 +17,7 @@ class HWDecoder : public IDecoder {
 public:
     HWDecoder(PacketQueue& pkt_queue, FrameQueue& frame_queue,
               AVHWDeviceType hw_type, const char* tag = "HWDec")
-        : IDecoder(pkt_queue, frame_queue, tag), hw_type_(hw_type) {}
+        : IDecoder(pkt_queue, frame_queue, tag), hw_type_(hw_type) { is_video_ = true; }
 
     ~HWDecoder() override { close(); }
 
@@ -134,8 +134,14 @@ protected:
                     sw_frame->pts = hw_frame->pts;
                     sw_frame->pkt_dts = hw_frame->pkt_dts;
                     sw_frame->best_effort_timestamp = hw_frame->best_effort_timestamp;
+                    sw_frame->key_frame = hw_frame->key_frame;
                     av_frame_unref(hw_frame);
 
+                    // After seek: discard non-keyframes
+                    if (!check_seek_frame(sw_frame)) {
+                        av_frame_unref(sw_frame);
+                        continue;
+                    }
                     if (!frame_queue_.push(sw_frame)) {
                         av_frame_unref(sw_frame);
                         goto done;

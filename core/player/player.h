@@ -14,6 +14,8 @@
 #include "render/audio_render.h"
 #include "render/debug_hud.h"
 #include "common/stats.h"
+#include "common/buffer_strategy.h"
+#include "render/subtitle_render.h"
 
 namespace sp {
 
@@ -64,9 +66,29 @@ public:
 
         duration_ = info.duration;
         is_live_ = info.is_live;
-        SP_LOGI("Player", "Prepared: %dx%d, %.1fs, live=%s",
-                video_width_, video_height_, duration_, is_live_ ? "yes" : "no");
+
+        // Auto-detect subtitle file (same name as video, .srt extension)
+        auto srt_path = detect_subtitle_file(url);
+        if (!srt_path.empty()) {
+            subtitle_render_ = std::make_unique<SubtitleRender>();
+            if (subtitle_render_->init(28)) {
+                subtitle_render_->load_srt(srt_path);
+            }
+        }
+
+        SP_LOGI("Player", "Prepared: %dx%d, %.1fs, live=%s, subs=%s",
+                video_width_, video_height_, duration_, is_live_ ? "yes" : "no",
+                (subtitle_render_ && subtitle_render_->has_subtitles()) ? "yes" : "no");
         return true;
+    }
+
+    // Load external subtitle file.
+    bool load_subtitle(const std::string& path) {
+        if (!subtitle_render_) {
+            subtitle_render_ = std::make_unique<SubtitleRender>();
+            if (!subtitle_render_->init(28)) return false;
+        }
+        return subtitle_render_->load_srt(path);
     }
 
     // Initialize SDL window + renderers and start playback.
@@ -105,6 +127,13 @@ public:
                                       [this](AVFrame* f) { return audio_frame_queue_.pop(f); }))
                 return false;
         }
+
+        // Init buffer strategy
+        buffer_strategy_ = std::make_unique<BufferStrategy>(is_live_);
+        buffer_strategy_->set_on_state_change([this](BufferState s) {
+            if (s == BufferState::Buffering) stats_.on_buffering_start();
+            else stats_.on_buffering_end();
+        });
 
         // Init stats
         stats_.reset();
@@ -147,12 +176,22 @@ public:
 
     void seek(double pos_sec) {
         if (!demuxer_ || is_live_) return;
+        SP_LOGI("Player", "Seek to %.1fs", pos_sec);
+
+        // 1. Flush all queues
         video_pkt_queue_.flush();
         audio_pkt_queue_.flush();
         video_frame_queue_.flush();
         audio_frame_queue_.flush();
-        if (video_decoder_) video_decoder_->flush();
+
+        // 2. Flush decoders and mark seek (discard until next keyframe)
+        if (video_decoder_) {
+            video_decoder_->flush();
+            video_decoder_->mark_seek();
+        }
         if (audio_decoder_) audio_decoder_->flush();
+
+        // 3. Seek in demuxer
         demuxer_->seek(pos_sec);
         eof_ = false;
     }
@@ -234,11 +273,27 @@ private:
             debug_hud_.toggle();
             SP_LOGI("Player", "Debug HUD: %s", debug_hud_.visible() ? "ON" : "OFF");
             break;
+        case SDLK_s:
+            subtitles_visible_ = !subtitles_visible_;
+            SP_LOGI("Player", "Subtitles: %s", subtitles_visible_ ? "ON" : "OFF");
+            break;
         case SDLK_ESCAPE:
         case SDLK_q:
             state_ = PlayerState::Stopped;
             break;
         }
+    }
+
+    // Auto-detect .srt file next to video file.
+    static std::string detect_subtitle_file(const std::string& url) {
+        // Only for local files
+        if (url.find("://") != std::string::npos) return "";
+        auto dot = url.rfind('.');
+        if (dot == std::string::npos) return "";
+        std::string srt = url.substr(0, dot) + ".srt";
+        FILE* f = fopen(srt.c_str(), "r");
+        if (f) { fclose(f); return srt; }
+        return "";
     }
 
     double get_clock() const {
@@ -249,6 +304,19 @@ private:
     // Try to pop a video frame and render it with A/V sync.
     // Called from the main thread event loop — non-blocking.
     void render_video_frame(AVFrame* frame) {
+        // Update buffer strategy
+        if (buffer_strategy_) {
+            // Estimate buffer duration from queue sizes and frame rate
+            double vbuf = video_frame_queue_.size() * 0.033; // ~30fps estimate
+            double abuf = audio_frame_queue_.size() * 0.023; // ~1024 samples at 44100
+            buffer_strategy_->update(vbuf, abuf);
+
+            if (!buffer_strategy_->should_render()) {
+                SDL_Delay(10);
+                return;
+            }
+        }
+
         // Non-blocking peek: is there a frame ready?
         double peek_pts = 0.0;
         if (!video_frame_queue_.peek_pts(&peek_pts)) {
@@ -322,6 +390,15 @@ private:
         // Render video frame (does not present yet)
         video_render_->render(frame);
 
+        // Render subtitles
+        if (subtitles_visible_ && subtitle_render_ && subtitle_render_->has_subtitles()) {
+            double sub_pts = (frame->pts != AV_NOPTS_VALUE)
+                ? static_cast<double>(frame->pts) * av_q2d(video_time_base_) : 0.0;
+            int ww, wh;
+            SDL_GetWindowSize(window_, &ww, &wh);
+            subtitle_render_->render(video_render_->renderer(), sub_pts, ww, wh);
+        }
+
         // Render debug HUD overlay on top of video
         if (debug_hud_.visible()) {
             debug_hud_.render(video_render_->renderer(), stats_.snapshot());
@@ -355,6 +432,13 @@ private:
     std::unique_ptr<IDecoder> audio_decoder_;
     std::unique_ptr<VideoRender> video_render_;
     std::unique_ptr<AudioRender> audio_render_;
+
+    // Subtitles
+    std::unique_ptr<SubtitleRender> subtitle_render_;
+    bool subtitles_visible_ = true;
+
+    // Buffer strategy
+    std::unique_ptr<BufferStrategy> buffer_strategy_;
 
     // Stats & Debug
     StatsCollector stats_;

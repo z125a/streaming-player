@@ -6,8 +6,9 @@ namespace sp {
 // Software decoder using libavcodec (CPU-based).
 class SoftDecoder : public IDecoder {
 public:
-    SoftDecoder(PacketQueue& pkt_queue, FrameQueue& frame_queue, const char* tag = "SoftDec")
-        : IDecoder(pkt_queue, frame_queue, tag) {}
+    SoftDecoder(PacketQueue& pkt_queue, FrameQueue& frame_queue,
+                const char* tag = "SoftDec", bool video = true)
+        : IDecoder(pkt_queue, frame_queue, tag) { is_video_ = video; }
 
     ~SoftDecoder() override { close(); }
 
@@ -71,6 +72,11 @@ protected:
                 if (ret < 0) {
                     SP_LOGE(tag_, "receive_frame error: %d", ret);
                     break;
+                }
+                // After seek: discard non-keyframes to avoid artifacts
+                if (!check_seek_frame(frame)) {
+                    av_frame_unref(frame);
+                    continue;
                 }
                 if (!frame_queue_.push(frame)) {
                     av_frame_unref(frame);
