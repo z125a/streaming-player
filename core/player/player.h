@@ -304,15 +304,20 @@ private:
     // Try to pop a video frame and render it with A/V sync.
     // Called from the main thread event loop — non-blocking.
     void render_video_frame(AVFrame* frame) {
-        // Update buffer strategy
+        // Update buffer strategy based on packet queues (larger, better estimate)
         if (buffer_strategy_) {
-            // Estimate buffer duration from queue sizes and frame rate
-            double vbuf = video_frame_queue_.size() * 0.033; // ~30fps estimate
-            double abuf = audio_frame_queue_.size() * 0.023; // ~1024 samples at 44100
+            // Use packet queue + frame queue combined for buffer estimation
+            // Packet durations are in time_base units; use simple heuristic here
+            double vpkts = video_pkt_queue_.size();
+            double apkts = audio_pkt_queue_.size();
+            double vframes = video_frame_queue_.size();
+            // Rough estimate: each packet ≈ 1 frame ≈ 33ms at 30fps
+            double vbuf = (vpkts + vframes) * 0.033;
+            double abuf = (apkts + audio_frame_queue_.size()) * 0.023;
             buffer_strategy_->update(vbuf, abuf);
 
             if (!buffer_strategy_->should_render()) {
-                SDL_Delay(10);
+                SDL_Delay(5);
                 return;
             }
         }

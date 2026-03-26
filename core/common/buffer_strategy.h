@@ -25,8 +25,8 @@ class BufferStrategy {
 public:
     struct Config {
         // --- VOD settings ---
-        double start_buffer_sec = 1.0;    // Minimum buffer before initial play
-        double rebuffer_sec = 0.5;         // Minimum buffer to exit rebuffering
+        double start_buffer_sec = 0.15;    // Minimum buffer before initial play (fast start)
+        double rebuffer_sec = 0.1;         // Minimum buffer to exit rebuffering
         double high_water_sec = 5.0;       // Comfortable buffer level
         double max_buffer_sec = 30.0;      // Max buffer before backpressure
 
