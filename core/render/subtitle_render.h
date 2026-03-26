@@ -35,14 +35,23 @@ public:
             return false;
         }
 
+        // Prefer Noto Sans CJK Medium — clean, readable, CJK support
         static const char* font_paths[] = {
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            // Noto Sans CJK Medium (best for subtitles)
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Medium.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Medium.ttc",
+            // Noto Sans CJK Regular fallback
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            // macOS
             "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            // Windows
             "C:\\Windows\\Fonts\\msyh.ttc",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            // Fallback
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             nullptr
         };
 
@@ -159,36 +168,44 @@ private:
             cached_texture_ = nullptr;
         }
 
-        // Render shadow first, then text on top
-        SDL_Color shadow_color = {0, 0, 0, 200};
         SDL_Color text_color = {255, 255, 255, 255};
+        SDL_Color outline_color = {0, 0, 0, 255};
 
         // Wrap text at 80% of window width
         int wrap_width = static_cast<int>(window_w * 0.8);
 
-        SDL_Surface* shadow_surf = TTF_RenderUTF8_Blended_Wrapped(
-            font_, text.c_str(), shadow_color, wrap_width);
+        // Render outline (black) by drawing text offset in 8 directions
+        TTF_SetFontOutline(font_, 2);
+        SDL_Surface* outline_surf = TTF_RenderUTF8_Blended_Wrapped(
+            font_, text.c_str(), outline_color, wrap_width);
+        TTF_SetFontOutline(font_, 0);
+
+        // Render main text (white)
         SDL_Surface* text_surf = TTF_RenderUTF8_Blended_Wrapped(
             font_, text.c_str(), text_color, wrap_width);
 
-        if (!text_surf) return;
+        if (!text_surf) {
+            if (outline_surf) SDL_FreeSurface(outline_surf);
+            return;
+        }
 
-        // Compose: shadow offset by 2px, then text on top
-        int w = text_surf->w + 4;
-        int h = text_surf->h + 4;
+        // Compose: outline behind, text on top (outline is slightly larger)
+        int w = outline_surf ? outline_surf->w : text_surf->w;
+        int h = outline_surf ? outline_surf->h : text_surf->h;
         SDL_Surface* composed = SDL_CreateRGBSurfaceWithFormat(
             0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
         SDL_SetSurfaceBlendMode(composed, SDL_BLENDMODE_BLEND);
         SDL_FillRect(composed, nullptr, SDL_MapRGBA(composed->format, 0, 0, 0, 0));
 
-        if (shadow_surf) {
-            SDL_Rect shadow_dst = {2, 2, shadow_surf->w, shadow_surf->h};
-            SDL_SetSurfaceBlendMode(shadow_surf, SDL_BLENDMODE_BLEND);
-            SDL_BlitSurface(shadow_surf, nullptr, composed, &shadow_dst);
-            SDL_FreeSurface(shadow_surf);
+        if (outline_surf) {
+            SDL_Rect outline_dst = {0, 0, outline_surf->w, outline_surf->h};
+            SDL_SetSurfaceBlendMode(outline_surf, SDL_BLENDMODE_BLEND);
+            SDL_BlitSurface(outline_surf, nullptr, composed, &outline_dst);
+            SDL_FreeSurface(outline_surf);
         }
 
-        SDL_Rect text_dst = {0, 0, text_surf->w, text_surf->h};
+        // Center text on outline (outline adds 2px border)
+        SDL_Rect text_dst = {2, 2, text_surf->w, text_surf->h};
         SDL_SetSurfaceBlendMode(text_surf, SDL_BLENDMODE_BLEND);
         SDL_BlitSurface(text_surf, nullptr, composed, &text_dst);
         SDL_FreeSurface(text_surf);
