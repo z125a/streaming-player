@@ -71,7 +71,7 @@ public:
         auto srt_path = detect_subtitle_file(url);
         if (!srt_path.empty()) {
             subtitle_render_ = std::make_unique<SubtitleRender>();
-            if (subtitle_render_->init(30)) {
+            if (subtitle_render_->init(22)) {
                 subtitle_render_->load_srt(srt_path);
             }
         }
@@ -86,7 +86,7 @@ public:
     bool load_subtitle(const std::string& path) {
         if (!subtitle_render_) {
             subtitle_render_ = std::make_unique<SubtitleRender>();
-            if (!subtitle_render_->init(30)) return false;
+            if (!subtitle_render_->init(22)) return false;
         }
         return subtitle_render_->load_srt(path);
     }
